@@ -1,0 +1,70 @@
+--Підзапит 1: витягаємо сирі дані
+WITH session_info AS (
+  SELECT
+    -- 1. Додаємо user_pseudo_id та ga_session_id
+    user_pseudo_id,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_number') AS user_session_number,
+    (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS ga_session_id,
+    -- 2. Об'єднуємо ці два показники для відображення унікального ідентифікатора сесії юзера
+    CONCAT(
+      user_pseudo_id, 
+      '-', 
+      CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)
+    ) AS unique_session_id,
+      -- 3. Створюємо landing_page_location через REGEXP_EXTRACT (очищаємо URL від параметрів)
+   REGEXP_EXTRACT(
+  (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'page_location'), 
+  r'https?://[^/]+([^?#]*)'
+) AS landing_page_location,
+    -- 4. Додаємо всі дані стовпчиків: Source, medium та campaign
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'source') AS traffic_source,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'medium') AS traffic_medium,
+    (SELECT value.string_value FROM UNNEST(event_params) WHERE key = 'campaign') AS traffic_campaign,
+      -- Додаємо дані стовпчиків: Категорія пристрою, Мова пристрою, Операційна система
+    device.category AS device_category,
+    device.language AS device_language,
+    device.operating_system AS device_os
+     FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+     --Обмежуємо вибірку періодом у три місяці
+WHERE _TABLE_SUFFIX BETWEEN '20201101'and '20210131'
+      -- 5. Додаємо умову: беремо лише ті події, де event_name дорівнює початку сесії
+    AND event_name = 'session_start'),
+    --Підзапит 2: додаємо дані зі стовпчика event_timestamp
+    events AS (
+  SELECT 
+    CONCAT(user_pseudo_id, '-', CAST((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS STRING)) AS session_id,
+    -- Перетворюємо мікросекунди у формат таймстемп
+    TIMESTAMP_MICROS(event_timestamp) AS event_time,
+   --Додаємо стовпчик event_name
+    event_name
+  FROM `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`
+  WHERE _TABLE_SUFFIX BETWEEN '20201101' AND '20210131'
+    AND (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') IS NOT NULL
+   --Додаємо умову
+    AND event_name IN (
+      'session_start',       -- 1. Початок сесії на сайті
+      'view_item',           -- 2. Перегляд товару
+      'add_to_cart',         -- 3. Додавання товару до корзини
+      'begin_checkout',      -- 4. Початок оформлення замовлення
+      'add_shipping_info',   -- 5. Додавання інформації про доставку
+      'add_payment_info',    -- 6. Додавання платіжної інформації
+      'purchase'             -- 7. Покупка
+    )
+)
+-- В основному запиті використовуємо всі необхідні поля і об'єднуємо таблиці за допомогою LEFT JOIN
+SELECT
+  ev.session_id,
+  base.user_pseudo_id,   
+  base.user_session_number,
+  ev.event_time,
+  ev.event_name,
+  base.landing_page_location,
+  base.traffic_source,
+  base.traffic_medium,
+  base.traffic_campaign,
+  base.device_category,
+  base.device_language,
+  base.device_os
+FROM session_info AS base
+LEFT JOIN events AS ev 
+  ON base.unique_session_id = ev.session_id; 
